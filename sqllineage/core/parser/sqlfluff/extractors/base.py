@@ -15,6 +15,7 @@ from sqllineage.core.parser.sqlfluff.models import (
 from sqllineage.core.parser.sqlfluff.utils import (
     find_from_expression_element,
     find_table_identifier,
+    find_values_clause,
     is_subquery,
     list_child_segments,
     list_join_clause,
@@ -149,12 +150,16 @@ class BaseExtractor:
                 if segment.get_child("alias_expression"):
                     tables.append(SqlFluffLateralView.of(segment))
                 return tables
-        first_segment = all_segments[0]
-        if first_segment.type == "bracketed":
-            if table_expression := first_segment.get_child("table_expression"):
-                if table_expression.get_child("values_clause"):
-                    # (VALUES ...) AS alias, no dataset involved
-                    return tables
+        if values_clause := find_values_clause(segment):
+            # (VALUES ...) AS alias, no dataset involved.
+            # when aliased, the VALUES list is read like a lateral view, whose columns are generated from the values
+            # at the same position of each row, which may refer to the datasets before it, like tsql CROSS APPLY:
+            # FROM tab CROSS APPLY (VALUES (tab.col1), (tab.col2)) AS alias (col3): alias.col3 <- tab.col1, tab.col2
+            if segment.get_child("alias_expression") or values_clause.get_child(
+                "alias_expression"
+            ):
+                tables.append(SqlFluffLateralView.of(segment))
+            return tables
         subqueries = list_subqueries(segment)
         if subqueries:
             for sq in subqueries:

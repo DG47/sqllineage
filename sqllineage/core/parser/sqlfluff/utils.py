@@ -86,6 +86,18 @@ def find_from_expression_element(segment: BaseSegment) -> BaseSegment | None:
     return from_expression_element
 
 
+def find_values_clause(segment: BaseSegment) -> BaseSegment | None:
+    """
+    For a from_expression_element segment, find the values_clause when the dataset is a VALUES list:
+        FROM (VALUES (col1, col2), (col3, col4)) AS alias (col5, col6)
+        FROM VALUES (col1, col2), (col3, col4) AS alias (col5, col6)
+    """
+    table_expression = segment.get_child("table_expression")
+    if table_expression is None and (bracketed := segment.get_child("bracketed")):
+        table_expression = bracketed.get_child("table_expression")
+    return table_expression.get_child("values_clause") if table_expression else None
+
+
 def find_table_identifier(segment: BaseSegment) -> BaseSegment | None:
     """
     recursively find table identifier
@@ -277,6 +289,21 @@ def list_alias_expression_column_aliases(segment: BaseSegment) -> list[BaseSegme
         if identifier_list := bracketed.get_child("identifier_list"):
             return identifier_list.get_children("identifier")
     return []
+
+
+def list_values_clause_rows(segment: BaseSegment) -> list[list[BaseSegment]]:
+    """
+    For a values_clause segment, list the value expressions of each row:
+        VALUES (col1, col2), (col3, col4) -> [[col1, col2], [col3, col4]]
+    """
+    return [
+        [
+            seg
+            for seg in list_child_segments(bracketed, check_bracketed=False)
+            if seg.type not in ["start_bracket", "end_bracket", "comma"]
+        ]
+        for bracketed in segment.get_children("bracketed")
+    ]
 
 
 def list_lateral_view_clauses(segment: BaseSegment) -> list[BaseSegment]:
