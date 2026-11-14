@@ -13,6 +13,7 @@ from sqllineage.core.parser.sqlfluff.models import (
     SqlFluffTable,
 )
 from sqllineage.core.parser.sqlfluff.utils import (
+    extract_table_operator_alias,
     find_from_expression_element,
     find_table_identifier,
     is_subquery,
@@ -181,6 +182,7 @@ class BaseExtractor:
                         if len(all_segments) > 1
                         else all_segments[0].raw
                     )
+                alias = extract_table_operator_alias(segment) or alias
                 if "." not in table_identifier.raw:
                     cte_dict = {s.alias: s for s in holder.cte}
                     cte = cte_dict.get(escape_identifier_name(table_identifier.raw))
