@@ -14,6 +14,7 @@ from sqlfluff.core.parser import BaseSegment
 from sqllineage import SQLPARSE_DIALECT
 from sqllineage.core.models import Table
 from sqllineage.utils.entities import ColumnQualifierTuple, SubQueryTuple
+from sqllineage.utils.helpers import escape_identifier_name
 
 NON_IDENTIFIER_OR_COLUMN_SEGMENT_TYPE = [
     "partitionby_clause",
@@ -466,6 +467,93 @@ def _extract_table_operator_alias(segment: BaseSegment) -> str | None:
     tsql puts the alias inside the PIVOT/UNPIVOT operator.
     Return None when no aliased operator is applied.
     """
+    alias = None
+    operator_applied = False
+    for seg in _list_table_operators(segment):
+        if seg.type == "alias_expression":
+            # only an alias after the operators names their result
+            if operator_applied:
+                alias = extract_identifier(seg)
+        else:
+            operator_applied = True
+            if table_reference := seg.get_child("table_reference"):
+                alias = extract_identifier(table_reference)
+    return alias
+
+
+def extract_unpivot_columns(segment: BaseSegment) -> dict[str, list[str]]:
+    """
+    For a from_expression_element segment, find the columns created by the UNPIVOT
+    operators applied to its dataset, each with the dataset columns it comes from:
+        FROM tab UNPIVOT (col1 FOR col2 IN (col3, col4)) AS alias
+    col1 holds the values of col3 and col4, and col2 their names, so both come from col3
+    and col4. With multiple value columns, they are matched by position:
+        FROM tab UNPIVOT ((col1, col2) FOR col3 IN ((col4, col5), (col6, col7)))
+    col1 <- col4, col6 and col2 <- col5, col7, while col3 <- col4, col5, col6, col7.
+    Return an empty dict when no UNPIVOT is applied.
+    """
+    columns: dict[str, list[str]] = {}
+    for operator in _list_table_operators(segment):
+        if not (
+            operator.type in ["from_unpivot_expression", "unpivot_clause"]
+            or (
+                operator.type == "from_pivot_expression"
+                and (keyword := operator.get_child("keyword")) is not None
+                and keyword.raw_upper == "UNPIVOT"
+            )
+        ):
+            continue
+        # the segment holding "value_column FOR name_column IN (...)"
+        spec = next(
+            (
+                seg
+                for seg in operator.recursive_crawl_all()
+                if any(
+                    s.type == "keyword" and s.raw_upper == "FOR" for s in seg.segments
+                )
+            ),
+            None,
+        )
+        if spec is None:
+            continue
+        children = [seg for seg in spec.segments if not is_negligible(seg)]
+        keywords = [
+            seg.raw_upper if seg.type == "keyword" else None for seg in children
+        ]
+        if "IN" not in keywords or keywords.index("IN") + 1 >= len(children):
+            continue
+        idx_for, idx_in = keywords.index("FOR"), keywords.index("IN")
+        value_columns = [
+            name for seg in children[:idx_for] for name in _list_column_names(seg)
+        ]
+        name_columns = [
+            name
+            for seg in children[idx_for + 1 : idx_in]
+            for name in _list_column_names(seg)
+        ]
+        in_list = [
+            names
+            for seg in children[idx_in + 1].segments
+            if seg.type != "alias_expression" and (names := _list_column_names(seg))
+        ]
+        created = {
+            column: [names[i] for names in in_list if i < len(names)]
+            for i, column in enumerate(value_columns)
+        } | {column: [n for names in in_list for n in names] for column in name_columns}
+        # a column created by a previous UNPIVOT in turn comes from its own sources
+        columns |= {
+            column: [s for src in sources for s in columns.get(src, [src])]
+            for column, sources in created.items()
+        }
+    return columns
+
+
+def _list_table_operators(segment: BaseSegment) -> list[BaseSegment]:
+    """
+    For a from_expression_element segment, list the table operators applied to its
+    dataset, and their aliases. sqlfluff puts the operators either inside the
+    from_expression_element, or after it under from_expression.
+    """
     segments = list_child_segments(segment)[1:]
     if (parent := segment.get_parent()) is not None:
         parent_segment, idx = parent
@@ -475,8 +563,7 @@ def _extract_table_operator_alias(segment: BaseSegment) -> str | None:
                 for seg in parent_segment.segments[idx + 1 :]
                 if not is_negligible(seg)
             ]
-    alias = None
-    operator_applied = False
+    operators = []
     for seg in segments:
         if seg.type in [
             "from_pivot_expression",
@@ -486,17 +573,26 @@ def _extract_table_operator_alias(segment: BaseSegment) -> str | None:
             "from_at_expression",
             "from_before_expression",
             "changes_clause",
+            "alias_expression",
         ]:
-            operator_applied = True
-            if table_reference := seg.get_child("table_reference"):
-                alias = extract_identifier(table_reference)
-        elif seg.type == "alias_expression":
-            # only an alias after the operators names their result
-            if operator_applied:
-                alias = extract_identifier(seg)
+            operators.append(seg)
         else:
             break
-    return alias
+    return operators
+
+
+def _list_column_names(segment: BaseSegment) -> list[str]:
+    """
+    the column names in an UNPIVOT column list: col1, or (col1, col2) for multiple
+    columns
+    """
+    if segment.type == "bracketed":
+        return [name for seg in segment.segments for name in _list_column_names(seg)]
+    elif segment.type in ["column_reference", "pivot_column_reference"]:
+        return [escape_identifier_name(extract_identifier(segment))]
+    elif segment.is_type("identifier"):
+        return [escape_identifier_name(segment.raw)]
+    return []
 
 
 def extract_column_qualifier(segment: BaseSegment) -> ColumnQualifierTuple | None:

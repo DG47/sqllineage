@@ -27,11 +27,19 @@ FROM tab2 UNPIVOT (sales FOR quarter IN (q1, q2)) AS u"""
         [
             (ColumnQualifierTuple("id", "tab2"), ColumnQualifierTuple("id", "tab1")),
             (
-                ColumnQualifierTuple("quarter", "tab2"),
+                ColumnQualifierTuple("q1", "tab2"),
                 ColumnQualifierTuple("quarter", "tab1"),
             ),
             (
-                ColumnQualifierTuple("sales", "tab2"),
+                ColumnQualifierTuple("q2", "tab2"),
+                ColumnQualifierTuple("quarter", "tab1"),
+            ),
+            (
+                ColumnQualifierTuple("q1", "tab2"),
+                ColumnQualifierTuple("sales", "tab1"),
+            ),
+            (
+                ColumnQualifierTuple("q2", "tab2"),
                 ColumnQualifierTuple("sales", "tab1"),
             ),
         ],

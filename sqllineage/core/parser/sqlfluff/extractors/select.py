@@ -10,6 +10,8 @@ from sqllineage.core.parser.sqlfluff.models import (
     SqlFluffTable,
 )
 from sqllineage.core.parser.sqlfluff.utils import (
+    extract_from_expression_element_alias,
+    extract_unpivot_columns,
     find_table_identifier,
     is_set_expression,
     list_child_segments,
@@ -78,6 +80,7 @@ class SelectExtractor(BaseExtractor, SourceHandlerMixin):
             self._list_table_from_from_clause_or_join_clause(segment, holder)
         )
         self._handle_lateral_view(segment)
+        self._handle_unpivot(segment)
         self._handle_column(segment)
 
     def _handle_swap_partition(
@@ -131,6 +134,47 @@ class SelectExtractor(BaseExtractor, SourceHandlerMixin):
                 for lateral_view_clause in list_lateral_view_clauses(segment)
             ]
         )
+
+    def _handle_unpivot(self, segment: BaseSegment) -> None:
+        """
+        A handler for UNPIVOT operator:
+            SELECT col1, col2 FROM tab UNPIVOT (col1 FOR col2 IN (col3, col4)) AS alias
+        col1 and col2 are created by UNPIVOT from col3 and col4, they're not columns of
+        tab. The columns of this query referring to them, unqualified or qualified by
+        alias, are read from col3 and col4.
+        """
+        if segment.type == "from_clause":
+            # columns of the current query in a set expression, the select clause is
+            # handled before from clause
+            columns = self.columns[
+                self.union_barriers[-1][0] if self.union_barriers else 0 :
+            ]
+            for from_expression_element in segment.recursive_crawl(
+                "from_expression_element",
+                recurse_into=False,
+                no_recursive_seg_type="select_statement",
+            ):
+                if not (
+                    unpivot_columns := extract_unpivot_columns(from_expression_element)
+                ):
+                    continue
+                alias = extract_from_expression_element_alias(from_expression_element)
+                qualifiers = {
+                    None,
+                    escape_identifier_name(alias) if alias is not None else None,
+                }
+                for column in columns:
+                    column.source_columns = list(
+                        dict.fromkeys(
+                            (src_col, qualifier)
+                            for raw_name, qualifier in column.source_columns
+                            for src_col in (
+                                unpivot_columns.get(raw_name, [raw_name])
+                                if qualifier in qualifiers
+                                else [raw_name]
+                            )
+                        )
+                    )
 
     def _handle_set_expression(
         self, segment: BaseSegment, holder: SubQueryLineageHolder
